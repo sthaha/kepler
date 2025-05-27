@@ -4,15 +4,18 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
+	"dario.cat/mergo"
 	"github.com/alecthomas/kingpin/v2"
-	"github.com/imdario/mergo"
 	"gopkg.in/yaml.v3"
+	"k8s.io/utils/ptr"
 )
 
 // Config represents the complete application configuration
@@ -34,7 +37,7 @@ type (
 	// Development mode settings; disabled by default
 	Dev struct {
 		FakeCpuMeter struct {
-			Enabled bool     `yaml:"enabled"`
+			Enabled *bool    `yaml:"enabled"`
 			Zones   []string `yaml:"zones"`
 		} `yaml:"fake-cpu-meter"`
 	}
@@ -49,11 +52,11 @@ type (
 
 	// Exporter configuration
 	StdoutExporter struct {
-		Enabled bool `yaml:"enabled"`
+		Enabled *bool `yaml:"enabled"`
 	}
 
 	PrometheusExporter struct {
-		Enabled         bool     `yaml:"enabled"`
+		Enabled         *bool    `yaml:"enabled"`
 		DebugCollectors []string `yaml:"debugCollectors"`
 	}
 
@@ -64,7 +67,7 @@ type (
 
 	// Debug configuration
 	PprofDebug struct {
-		Enabled bool `yaml:"enabled"`
+		Enabled *bool `yaml:"enabled"`
 	}
 
 	Debug struct {
@@ -81,6 +84,15 @@ type (
 		Debug    Debug    `yaml:"debug"`
 		Dev      Dev      `yaml:"dev"` // WARN: do not expose dev settings as flags
 	}
+
+	// Builder is a struct for building a config
+	Builder struct {
+		yamls  []string
+		Config *Config
+	}
+
+	// PtrBoolTransformer is a custom transformer for merging boolean types.
+	PtrBoolTransformer struct{}
 )
 
 type SkipValidation int
@@ -137,20 +149,21 @@ func DefaultConfig() *Config {
 		},
 		Exporter: Exporter{
 			Stdout: StdoutExporter{
-				Enabled: false,
+				Enabled: ptr.To(false),
 			},
 			Prometheus: PrometheusExporter{
-				Enabled:         true,
+				Enabled:         ptr.To(true),
 				DebugCollectors: []string{"go"},
 			},
 		},
 		Debug: Debug{
 			Pprof: PprofDebug{
-				Enabled: false,
+				Enabled: ptr.To(false),
 			},
 		},
 	}
 
+	cfg.Dev.FakeCpuMeter.Enabled = ptr.To(false)
 	return cfg
 }
 
@@ -250,7 +263,7 @@ func RegisterFlags(app *kingpin.Application) ConfigUpdaterFn {
 		}
 
 		if flagsSet[pprofEnabledFlag] {
-			cfg.Debug.Pprof.Enabled = *enablePprof
+			cfg.Debug.Pprof.Enabled = enablePprof
 		}
 
 		if flagsSet[WebConfigFlag] {
@@ -258,11 +271,11 @@ func RegisterFlags(app *kingpin.Application) ConfigUpdaterFn {
 		}
 
 		if flagsSet[ExporterStdoutEnabledFlag] {
-			cfg.Exporter.Stdout.Enabled = *stdoutExporterEnabled
+			cfg.Exporter.Stdout.Enabled = stdoutExporterEnabled
 		}
 
 		if flagsSet[ExporterPrometheusEnabledFlag] {
-			cfg.Exporter.Prometheus.Enabled = *prometheusExporterEnabled
+			cfg.Exporter.Prometheus.Enabled = prometheusExporterEnabled
 		}
 
 		cfg.sanitize()
@@ -427,31 +440,53 @@ func (c *Config) manualString() string {
 	return sb.String()
 }
 
-func (c *Config) merge(additional *Config) error {
-	return mergo.Merge(c, additional, mergo.WithOverride)
+func (t PtrBoolTransformer) Transformer(typ reflect.Type) func(dst, src reflect.Value) error {
+	if typ == reflect.TypeOf((*bool)(nil)) {
+		return func(dst, src reflect.Value) error {
+			if src.IsNil() {
+				return nil
+			}
+			if dst.CanSet() {
+				dst.Set(src)
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
-// mergeYAML merges a YAML string into the existing config
-func (c *Config) mergeYAML(yamlStr string) error {
-	if strings.TrimSpace(yamlStr) == "" {
-		return nil
-	}
-
-	additional := &Config{}
-	if err := yaml.Unmarshal([]byte(yamlStr), additional); err != nil {
-		return fmt.Errorf("failed to parse YAML config: %w", err)
-	}
-
-	return c.merge(additional)
+// Use sets the default configuration
+func (b *Builder) Use(c *Config) *Builder {
+	b.Config = c
+	return b
 }
 
-// MergeAdditionalConfigs merges additional YAML configurations into a default config
-func MergeAdditionalConfigs(defaultConfig *Config, additionalConfigs ...string) error {
-	for _, cfg := range additionalConfigs {
-		if err := defaultConfig.mergeYAML(cfg); err != nil {
-			return fmt.Errorf("failed to merge additional config: %w", err)
+// Merge adds a YAML string to be merged into the configuration
+func (b *Builder) Merge(yamls ...string) *Builder {
+	b.yamls = append(b.yamls, yamls...)
+	return b
+}
+
+// Build constructs the final configuration by merging all additional YAMLS into the default configuration
+func (b *Builder) Build() (*Config, error) {
+	if b.Config == nil {
+		b.Config = DefaultConfig()
+	}
+
+	var errs error
+	for _, y := range b.yamls {
+		additional := &Config{}
+		if err := yaml.Unmarshal([]byte(y), additional); err != nil {
+			return nil, fmt.Errorf("failed to parse YAML config: %w", err)
+		}
+
+		if err := mergo.Merge(b.Config, additional, mergo.WithOverride, mergo.WithTransformers(PtrBoolTransformer{})); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("failed to merge config: %w, yaml: %s", err, y))
+		}
+		if errs != nil {
+			return nil, errs
 		}
 	}
 
-	return nil
+	return b.Config, nil
 }
