@@ -46,9 +46,9 @@ func (b *Builder) Build() (*Config, error) {
 		if err := mergo.Merge(b.Config, additional, mergo.WithOverride, mergo.WithTransformers(boolPtrTransformer{})); err != nil {
 			errs = errors.Join(errs, fmt.Errorf("failed to merge config: %w, yaml: %s", err, y))
 		}
-		if errs != nil {
-			return nil, errs
-		}
+	}
+	if errs != nil {
+		return nil, errs
 	}
 
 	return b.Config, nil
