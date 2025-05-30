@@ -40,7 +40,7 @@ func (b *Builder) Build() (*Config, error) {
 	for _, y := range b.yamls {
 		additional := &Config{}
 		if err := yaml.Unmarshal([]byte(y), additional); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("failed to merge config: %w, yaml: %s", err, y))
+			errs = errors.Join(errs, fmt.Errorf("failed to parse YAML: %w, yaml: %s", err, y))
 			continue
 		}
 
