@@ -4,15 +4,12 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"reflect"
 	"strings"
 	"time"
 
-	"dario.cat/mergo"
 	"github.com/alecthomas/kingpin/v2"
 	"gopkg.in/yaml.v3"
 	"k8s.io/utils/ptr"
@@ -84,15 +81,6 @@ type (
 		Debug    Debug    `yaml:"debug"`
 		Dev      Dev      `yaml:"dev"` // WARN: do not expose dev settings as flags
 	}
-
-	// Builder is a struct for building a config
-	Builder struct {
-		yamls  []string
-		Config *Config
-	}
-
-	// PtrBoolTransformer is a custom transformer for merging boolean types.
-	PtrBoolTransformer struct{}
 )
 
 type SkipValidation int
@@ -438,55 +426,4 @@ func (c *Config) manualString() string {
 	}
 
 	return sb.String()
-}
-
-func (t PtrBoolTransformer) Transformer(typ reflect.Type) func(dst, src reflect.Value) error {
-	if typ == reflect.TypeOf((*bool)(nil)) {
-		return func(dst, src reflect.Value) error {
-			if src.IsNil() {
-				return nil
-			}
-			if dst.CanSet() {
-				dst.Set(src)
-			}
-			return nil
-		}
-	}
-	return nil
-}
-
-// Use sets the default configuration
-func (b *Builder) Use(c *Config) *Builder {
-	b.Config = c
-	return b
-}
-
-// Merge adds a YAML string to be merged into the configuration
-func (b *Builder) Merge(yamls ...string) *Builder {
-	b.yamls = append(b.yamls, yamls...)
-	return b
-}
-
-// Build constructs the final configuration by merging all additional YAMLS into the default configuration
-func (b *Builder) Build() (*Config, error) {
-	if b.Config == nil {
-		b.Config = DefaultConfig()
-	}
-
-	var errs error
-	for _, y := range b.yamls {
-		additional := &Config{}
-		if err := yaml.Unmarshal([]byte(y), additional); err != nil {
-			return nil, fmt.Errorf("failed to parse YAML config: %w", err)
-		}
-
-		if err := mergo.Merge(b.Config, additional, mergo.WithOverride, mergo.WithTransformers(PtrBoolTransformer{})); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("failed to merge config: %w, yaml: %s", err, y))
-		}
-		if errs != nil {
-			return nil, errs
-		}
-	}
-
-	return b.Config, nil
 }

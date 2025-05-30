@@ -701,7 +701,7 @@ debug:
 	assert.True(t, *cfg.Debug.Pprof.Enabled, "pprof should be enabled")
 }
 
-func TestMergeConfig(t *testing.T) {
+func TestBuilder(t *testing.T) {
 	t.Run("Build", func(t *testing.T) {
 		// Test Build should return default config
 		b := &Builder{}
