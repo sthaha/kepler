@@ -40,13 +40,16 @@ func (b *Builder) Build() (*Config, error) {
 	for _, y := range b.yamls {
 		additional := &Config{}
 		if err := yaml.Unmarshal([]byte(y), additional); err != nil {
-			return nil, fmt.Errorf("failed to parse YAML config: %w", err)
+			errs = errors.Join(errs, fmt.Errorf("failed to merge config: %w, yaml: %s", err, y))
+			continue
 		}
 
 		if err := mergo.Merge(b.Config, additional, mergo.WithOverride, mergo.WithTransformers(boolPtrTransformer{})); err != nil {
 			errs = errors.Join(errs, fmt.Errorf("failed to merge config: %w, yaml: %s", err, y))
+			continue
 		}
 	}
+
 	if errs != nil {
 		return nil, errs
 	}
