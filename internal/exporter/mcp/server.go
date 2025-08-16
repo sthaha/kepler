@@ -30,9 +30,9 @@ type Server struct {
 	apiRegistry APIRegistry
 
 	// Configuration
-	useHTTP    bool
-	httpPath   string
-	transport  string // "stdio", "sse", "streamable"
+	useHTTP   bool
+	httpPath  string
+	transport string // "stdio", "sse", "streamable"
 }
 
 var (
@@ -120,6 +120,24 @@ func (s *Server) registerTools() {
 		Name:        "search_resources",
 		Description: "Search for resources matching specific criteria",
 	}, s.handleSearchResources)
+
+	// Register get_power_summary tool
+	mcp.AddTool(s.server, &mcp.Tool{
+		Name:        "get_power_summary",
+		Description: "Get a comprehensive power summary across all resource types",
+	}, s.handleGetPowerSummary)
+
+	// Register get_power_efficiency tool
+	mcp.AddTool(s.server, &mcp.Tool{
+		Name:        "get_power_efficiency",
+		Description: "Calculate power efficiency metrics for resources",
+	}, s.handleGetPowerEfficiency)
+
+	// Register get_terminated_resources tool
+	mcp.AddTool(s.server, &mcp.Tool{
+		Name:        "get_terminated_resources",
+		Description: "Get power data for recently terminated resources",
+	}, s.handleGetTerminatedResources)
 }
 
 // Init implements the Initializer interface

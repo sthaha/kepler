@@ -5,10 +5,10 @@ log:
 exporter:
   mcp:
     enabled: true
-    transport: "sse"      # Server-Sent Events transport
-    httpPath: "/mcp"      # HTTP endpoint path
+    transport: "sse" # Server-Sent Events transport
+    httpPath: "/mcp" # HTTP endpoint path
   prometheus:
-    enabled: false
+    enabled: true
 
 web:
   listenAddresses:
@@ -16,5 +16,5 @@ web:
 
 dev:
   fake-cpu-meter:
-    enabled: true
+    enabled: false
     zones: ["package", "core", "uncore", "dram"]

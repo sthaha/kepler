@@ -36,6 +36,25 @@ type SearchResourcesParams struct {
 	Limit        int     `json:"limit,omitempty" jsonschema:"Maximum number of results (default: 10)"`
 }
 
+// GetPowerSummaryParams defines parameters for get_power_summary tool
+type GetPowerSummaryParams struct {
+	IncludeZones bool `json:"include_zones,omitempty" jsonschema:"Include per-zone breakdown (default: false)"`
+	TopN         int  `json:"top_n,omitempty" jsonschema:"Number of top consumers per type (default: 3)"`
+}
+
+// GetPowerEfficiencyParams defines parameters for get_power_efficiency tool
+type GetPowerEfficiencyParams struct {
+	ResourceType string `json:"resource_type" jsonschema:"Resource type: process, container, vm, pod"`
+	Metric       string `json:"metric,omitempty" jsonschema:"Efficiency metric: power_per_cpu or energy_per_cpu (default: power_per_cpu)"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"Maximum number of results (default: 10)"`
+}
+
+// GetTerminatedResourcesParams defines parameters for get_terminated_resources tool
+type GetTerminatedResourcesParams struct {
+	ResourceType string `json:"resource_type" jsonschema:"Resource type: process, container, vm, pod"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"Maximum number of results (default: 10)"`
+}
+
 // PowerResourceInfo represents power consumption data for MCP responses
 type PowerResourceInfo struct {
 	Type        string             `json:"type"`
@@ -201,16 +220,16 @@ func (s *Server) convertNode(node *monitor.Node) []PowerResourceInfo {
 	energy := make(map[string]float64)
 
 	for zone, usage := range node.Zones {
-		power[zone.Name()] = float64(usage.Power)
-		energy[zone.Name()] = float64(usage.EnergyTotal)
+		power[zone.Name()] = usage.Power.Watts() // Total absolute power consumption
+		energy[zone.Name()] = usage.EnergyTotal.Joules()
 	}
 
 	return []PowerResourceInfo{{
 		Type:        "node",
 		ID:          "node",
 		Name:        "Node",
-		Power:       power,
-		EnergyTotal: energy,
+		Power:       power,  // Per-zone absolute power consumption
+		EnergyTotal: energy, // Per-zone energy consumption
 		Metadata: map[string]string{
 			"usage_ratio": fmt.Sprintf("%.2f", node.UsageRatio),
 			"timestamp":   node.Timestamp.Format("2006-01-02T15:04:05Z"),
@@ -226,8 +245,8 @@ func (s *Server) convertProcesses(processes map[string]*monitor.Process, limit i
 		energy := make(map[string]float64)
 
 		for zone, usage := range process.Zones {
-			power[zone.Name()] = float64(usage.Power)
-			energy[zone.Name()] = float64(usage.EnergyTotal)
+			power[zone.Name()] = usage.Power.Watts()
+			energy[zone.Name()] = usage.EnergyTotal.Joules()
 		}
 
 		resources = append(resources, PowerResourceInfo{
@@ -257,8 +276,8 @@ func (s *Server) convertContainers(containers map[string]*monitor.Container, lim
 		energy := make(map[string]float64)
 
 		for zone, usage := range container.Zones {
-			power[zone.Name()] = float64(usage.Power)
-			energy[zone.Name()] = float64(usage.EnergyTotal)
+			power[zone.Name()] = usage.Power.Watts()
+			energy[zone.Name()] = usage.EnergyTotal.Joules()
 		}
 
 		resources = append(resources, PowerResourceInfo{
@@ -286,8 +305,8 @@ func (s *Server) convertVMs(vms map[string]*monitor.VirtualMachine, limit int, s
 		energy := make(map[string]float64)
 
 		for zone, usage := range vm.Zones {
-			power[zone.Name()] = float64(usage.Power)
-			energy[zone.Name()] = float64(usage.EnergyTotal)
+			power[zone.Name()] = usage.Power.Watts()
+			energy[zone.Name()] = usage.EnergyTotal.Joules()
 		}
 
 		resources = append(resources, PowerResourceInfo{
@@ -314,8 +333,8 @@ func (s *Server) convertPods(pods map[string]*monitor.Pod, limit int, sortBy str
 		energy := make(map[string]float64)
 
 		for zone, usage := range pod.Zones {
-			power[zone.Name()] = float64(usage.Power)
-			energy[zone.Name()] = float64(usage.EnergyTotal)
+			power[zone.Name()] = usage.Power.Watts()
+			energy[zone.Name()] = usage.EnergyTotal.Joules()
 		}
 
 		resources = append(resources, PowerResourceInfo{
@@ -476,6 +495,444 @@ func formatSearchResults(resources []PowerResourceInfo, params SearchResourcesPa
 
 		sb.WriteString(fmt.Sprintf("%d. %s: %s, Power: %.2fW\n",
 			i+1, resource.ID, resource.Name, totalPower))
+	}
+
+	return sb.String()
+}
+
+// handleGetPowerSummary handles the get_power_summary tool call
+func (s *Server) handleGetPowerSummary(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[GetPowerSummaryParams]) (*mcp.CallToolResultFor[any], error) {
+	s.logger.Debug("Handling get_power_summary request", "include_zones", params.Arguments.IncludeZones)
+
+	snapshot, err := s.monitor.Snapshot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get snapshot: %w", err)
+	}
+
+	topN := params.Arguments.TopN
+	if topN <= 0 {
+		topN = 3
+	}
+
+	result := formatPowerSummary(snapshot, params.Arguments.IncludeZones, topN)
+
+	return &mcp.CallToolResultFor[any]{
+		Content: []mcp.Content{&mcp.TextContent{Text: result}},
+	}, nil
+}
+
+// handleGetPowerEfficiency handles the get_power_efficiency tool call
+func (s *Server) handleGetPowerEfficiency(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[GetPowerEfficiencyParams]) (*mcp.CallToolResultFor[any], error) {
+	s.logger.Debug("Handling get_power_efficiency request",
+		"resource_type", params.Arguments.ResourceType,
+		"metric", params.Arguments.Metric)
+
+	snapshot, err := s.monitor.Snapshot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get snapshot: %w", err)
+	}
+
+	metric := params.Arguments.Metric
+	if metric == "" {
+		metric = "power_per_cpu"
+	}
+
+	limit := params.Arguments.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	var resources []PowerResourceInfo
+	switch params.Arguments.ResourceType {
+	case "process":
+		resources = s.convertProcesses(snapshot.Processes, 0, "power")
+	case "container":
+		resources = s.convertContainers(snapshot.Containers, 0, "power")
+	case "vm":
+		resources = s.convertVMs(snapshot.VirtualMachines, 0, "power")
+	case "pod":
+		resources = s.convertPods(snapshot.Pods, 0, "power")
+	default:
+		return nil, fmt.Errorf("unsupported resource type: %s", params.Arguments.ResourceType)
+	}
+
+	efficiencyResults := s.calculateEfficiency(resources, metric, limit)
+	result := formatEfficiencyResults(efficiencyResults, params.Arguments.ResourceType, metric)
+
+	return &mcp.CallToolResultFor[any]{
+		Content: []mcp.Content{&mcp.TextContent{Text: result}},
+	}, nil
+}
+
+// handleGetTerminatedResources handles the get_terminated_resources tool call
+func (s *Server) handleGetTerminatedResources(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[GetTerminatedResourcesParams]) (*mcp.CallToolResultFor[any], error) {
+	s.logger.Debug("Handling get_terminated_resources request", "resource_type", params.Arguments.ResourceType)
+
+	snapshot, err := s.monitor.Snapshot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get snapshot: %w", err)
+	}
+
+	limit := params.Arguments.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	var resources []PowerResourceInfo
+	switch params.Arguments.ResourceType {
+	case "process":
+		resources = s.convertProcesses(snapshot.TerminatedProcesses, limit, "energy")
+	case "container":
+		resources = s.convertContainers(snapshot.TerminatedContainers, limit, "energy")
+	case "vm":
+		resources = s.convertVMs(snapshot.TerminatedVirtualMachines, limit, "energy")
+	case "pod":
+		resources = s.convertPods(snapshot.TerminatedPods, limit, "energy")
+	default:
+		return nil, fmt.Errorf("unsupported resource type: %s", params.Arguments.ResourceType)
+	}
+
+	result := formatTerminatedResults(resources, params.Arguments.ResourceType)
+
+	return &mcp.CallToolResultFor[any]{
+		Content: []mcp.Content{&mcp.TextContent{Text: result}},
+	}, nil
+}
+
+// Helper functions for new tools
+
+// EfficiencyResult represents efficiency calculation result
+type EfficiencyResult struct {
+	Resource   PowerResourceInfo
+	Efficiency float64
+}
+
+func (s *Server) calculateEfficiency(resources []PowerResourceInfo, metric string, limit int) []EfficiencyResult {
+	results := make([]EfficiencyResult, 0, len(resources))
+
+	for _, resource := range resources {
+		var totalPower, totalEnergy, cpuTime float64
+
+		for _, power := range resource.Power {
+			totalPower += power
+		}
+		for _, energy := range resource.EnergyTotal {
+			totalEnergy += energy
+		}
+
+		if cpuTimeStr, ok := resource.Metadata["cpu_total_time"]; ok {
+			if parsed, err := strconv.ParseFloat(cpuTimeStr, 64); err == nil {
+				cpuTime = parsed
+			}
+		}
+
+		if cpuTime > 0 {
+			var efficiency float64
+			switch metric {
+			case "power_per_cpu":
+				efficiency = totalPower / cpuTime
+			case "energy_per_cpu":
+				efficiency = totalEnergy / cpuTime
+			default:
+				efficiency = totalPower / cpuTime
+			}
+
+			results = append(results, EfficiencyResult{
+				Resource:   resource,
+				Efficiency: efficiency,
+			})
+		}
+	}
+
+	// Sort by efficiency (ascending - lower is better for efficiency metrics)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Efficiency < results[j].Efficiency
+	})
+
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results
+}
+
+func formatPowerSummary(snapshot *monitor.Snapshot, includeZones bool, topN int) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Power Summary (Timestamp: %s)\n\n", snapshot.Timestamp.Format("2006-01-02 15:04:05")))
+
+	// Node summary with CPU usage and zone breakdowns
+	if snapshot.Node != nil {
+		sb.WriteString(fmt.Sprintf("Node: CPU usage: %.1f%%\n", snapshot.Node.UsageRatio*100))
+
+		for zone, usage := range snapshot.Node.Zones {
+			sb.WriteString(fmt.Sprintf("  * %s: %.2fW | active: %.2fW | idle: %.2fW\n",
+				zone.Name(),
+				usage.Power.Watts(),
+				usage.ActivePower.Watts(),
+				usage.IdlePower.Watts(),
+			))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Process summary
+	processCount := len(snapshot.Processes)
+	terminatedProcessCount := len(snapshot.TerminatedProcesses)
+	if processCount > 0 || terminatedProcessCount > 0 {
+		sb.WriteString(fmt.Sprintf("Processes: running: %d", processCount))
+		if terminatedProcessCount > 0 {
+			sb.WriteString(fmt.Sprintf(" | terminated: %d", terminatedProcessCount))
+		}
+		sb.WriteString("\n")
+
+		if processCount > 0 {
+			// Calculate total power across all processes by zone
+			zoneTotals := make(map[string]float64)
+			for _, process := range snapshot.Processes {
+				for zone, usage := range process.Zones {
+					zoneTotals[zone.Name()] += usage.Power.Watts()
+				}
+			}
+
+			for zoneName, totalPower := range zoneTotals {
+				sb.WriteString(fmt.Sprintf("  * %s: %.2fW\n", zoneName, totalPower))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// Container summary
+	containerCount := len(snapshot.Containers)
+	terminatedContainerCount := len(snapshot.TerminatedContainers)
+	if containerCount > 0 || terminatedContainerCount > 0 {
+		sb.WriteString(fmt.Sprintf("Containers: running: %d", containerCount))
+		if terminatedContainerCount > 0 {
+			sb.WriteString(fmt.Sprintf(" | terminated: %d", terminatedContainerCount))
+		}
+		sb.WriteString("\n")
+
+		if containerCount > 0 {
+			// Calculate total power across all containers by zone
+			zoneTotals := make(map[string]float64)
+			for _, container := range snapshot.Containers {
+				for zone, usage := range container.Zones {
+					zoneTotals[zone.Name()] += usage.Power.Watts()
+				}
+			}
+
+			for zoneName, totalPower := range zoneTotals {
+				sb.WriteString(fmt.Sprintf("  * %s: %.2fW\n", zoneName, totalPower))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// VM summary
+	vmCount := len(snapshot.VirtualMachines)
+	terminatedVMCount := len(snapshot.TerminatedVirtualMachines)
+	if vmCount > 0 || terminatedVMCount > 0 {
+		sb.WriteString(fmt.Sprintf("VMs: running: %d", vmCount))
+		if terminatedVMCount > 0 {
+			sb.WriteString(fmt.Sprintf(" | terminated: %d", terminatedVMCount))
+		}
+		sb.WriteString("\n")
+
+		if vmCount > 0 {
+			// Calculate total power across all VMs by zone
+			zoneTotals := make(map[string]float64)
+			for _, vm := range snapshot.VirtualMachines {
+				for zone, usage := range vm.Zones {
+					zoneTotals[zone.Name()] += usage.Power.Watts()
+				}
+			}
+
+			for zoneName, totalPower := range zoneTotals {
+				sb.WriteString(fmt.Sprintf("  * %s: %.2fW\n", zoneName, totalPower))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// Pod summary
+	podCount := len(snapshot.Pods)
+	terminatedPodCount := len(snapshot.TerminatedPods)
+	if podCount > 0 || terminatedPodCount > 0 {
+		sb.WriteString(fmt.Sprintf("Pods: running: %d", podCount))
+		if terminatedPodCount > 0 {
+			sb.WriteString(fmt.Sprintf(" | terminated: %d", terminatedPodCount))
+		}
+		sb.WriteString("\n")
+
+		if podCount > 0 {
+			// Calculate total power across all pods by zone
+			zoneTotals := make(map[string]float64)
+			for _, pod := range snapshot.Pods {
+				for zone, usage := range pod.Zones {
+					zoneTotals[zone.Name()] += usage.Power.Watts()
+				}
+			}
+
+			for zoneName, totalPower := range zoneTotals {
+				sb.WriteString(fmt.Sprintf("  * %s: %.2fW\n", zoneName, totalPower))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// Show top consumers if requested and zones are enabled
+	if includeZones && topN > 0 {
+		sb.WriteString(fmt.Sprintf("Top %d Consumers by Type:\n\n", topN))
+
+		// Top processes
+		if len(snapshot.Processes) > 0 {
+			sb.WriteString("Top Processes:\n")
+			processes := make([]PowerResourceInfo, 0, len(snapshot.Processes))
+			for _, process := range snapshot.Processes {
+				power := make(map[string]float64)
+				for zone, usage := range process.Zones {
+					power[zone.Name()] = usage.Power.Watts()
+				}
+				processes = append(processes, PowerResourceInfo{
+					Type:  "process",
+					ID:    strconv.Itoa(process.PID),
+					Name:  process.Comm,
+					Power: power,
+				})
+			}
+
+			// Sort by total power
+			sort.Slice(processes, func(i, j int) bool {
+				var totalI, totalJ float64
+				for _, p := range processes[i].Power {
+					totalI += p
+				}
+				for _, p := range processes[j].Power {
+					totalJ += p
+				}
+				return totalI > totalJ
+			})
+
+			limit := topN
+			if len(processes) < limit {
+				limit = len(processes)
+			}
+
+			for i := 0; i < limit; i++ {
+				totalPower := 0.0
+				for _, p := range processes[i].Power {
+					totalPower += p
+				}
+				sb.WriteString(fmt.Sprintf("  %d. PID %s (%s): %.2fW\n", i+1, processes[i].ID, processes[i].Name, totalPower))
+			}
+			sb.WriteString("\n")
+		}
+
+		// Top containers
+		if len(snapshot.Containers) > 0 {
+			sb.WriteString("Top Containers:\n")
+			containers := make([]PowerResourceInfo, 0, len(snapshot.Containers))
+			for _, container := range snapshot.Containers {
+				power := make(map[string]float64)
+				for zone, usage := range container.Zones {
+					power[zone.Name()] = usage.Power.Watts()
+				}
+				containers = append(containers, PowerResourceInfo{
+					Type:  "container",
+					ID:    container.ID,
+					Name:  container.Name,
+					Power: power,
+				})
+			}
+
+			// Sort by total power
+			sort.Slice(containers, func(i, j int) bool {
+				var totalI, totalJ float64
+				for _, p := range containers[i].Power {
+					totalI += p
+				}
+				for _, p := range containers[j].Power {
+					totalJ += p
+				}
+				return totalI > totalJ
+			})
+
+			limit := topN
+			if len(containers) < limit {
+				limit = len(containers)
+			}
+
+			for i := 0; i < limit; i++ {
+				totalPower := 0.0
+				for _, p := range containers[i].Power {
+					totalPower += p
+				}
+				sb.WriteString(fmt.Sprintf("  %d. %s (%s): %.2fW\n", i+1, containers[i].ID, containers[i].Name, totalPower))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}
+
+func formatEfficiencyResults(results []EfficiencyResult, resourceType, metric string) string {
+	if len(results) == 0 {
+		return fmt.Sprintf("No %s resources found with CPU time data for efficiency calculation.", resourceType)
+	}
+
+	var sb strings.Builder
+	metricUnit := "W/s"
+	if metric == "energy_per_cpu" {
+		metricUnit = "J/s"
+	}
+
+	sb.WriteString(fmt.Sprintf("Most Efficient %s Resources (%s):\n\n", resourceType, metric))
+
+	for i, result := range results {
+		totalPower := 0.0
+		for _, power := range result.Resource.Power {
+			totalPower += power
+		}
+
+		cpuTime := 0.0
+		if cpuTimeStr, ok := result.Resource.Metadata["cpu_total_time"]; ok {
+			if parsed, err := strconv.ParseFloat(cpuTimeStr, 64); err == nil {
+				cpuTime = parsed
+			}
+		}
+
+		sb.WriteString(fmt.Sprintf("%d. %s: %s, Power: %.2fW, CPU Time: %.2fs, Efficiency: %.4f %s\n",
+			i+1, result.Resource.ID, result.Resource.Name, totalPower, cpuTime, result.Efficiency, metricUnit))
+	}
+
+	return sb.String()
+}
+
+func formatTerminatedResults(resources []PowerResourceInfo, resourceType string) string {
+	if len(resources) == 0 {
+		return fmt.Sprintf("No terminated %s resources found.", resourceType)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Recently Terminated %s Resources:\n\n", resourceType))
+
+	for i, resource := range resources {
+		totalEnergy := 0.0
+		for _, energy := range resource.EnergyTotal {
+			totalEnergy += energy
+		}
+
+		sb.WriteString(fmt.Sprintf("%d. %s: %s, Total Energy Consumed: %.0fJ\n",
+			i+1, resource.ID, resource.Name, totalEnergy))
+
+		if len(resource.Metadata) > 0 {
+			for key, value := range resource.Metadata {
+				if key != "cpu_total_time" && value != "" {
+					sb.WriteString(fmt.Sprintf("    %s: %s\n", key, value))
+				}
+			}
+		}
+		sb.WriteString("\n")
 	}
 
 	return sb.String()
